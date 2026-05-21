@@ -1,0 +1,12 @@
+services:
+  flashlearn:
+    build: .
+    network_mode: host
+    environment:
+      - PORT=5050
+    volumes:
+      - flashlearn-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  flashlearn-data:

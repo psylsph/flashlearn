@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>FlashLearn</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+
+        <!-- HOME -->
+        <div id="view-home" class="view active">
+            <div class="header">
+                <h1>⚡ FlashLearn</h1>
+                <button class="btn-icon" onclick="showView('settings')">⚙️</button>
+            </div>
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="value" id="stat-level">1</div>
+                    <div class="label">Level</div>
+                    <div class="xp-bar-container"><div class="xp-bar" id="xp-bar" style="width:0%"></div></div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" id="stat-streak">0</div>
+                    <div class="label">Day Streak 🔥</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" id="stat-reviewed">0</div>
+                    <div class="label">Cards Reviewed</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" id="stat-xp">0</div>
+                    <div class="label">Total XP ⭐</div>
+                </div>
+            </div>
+            <div class="deck-list" id="deck-list"></div>
+        </div>
+
+        <!-- UPLOAD -->
+        <div id="view-upload" class="view">
+            <div class="header">
+                <button class="header-back" onclick="showView('home')">← Back</button>
+                <h1>📸 New Deck</h1>
+                <div></div>
+            </div>
+            <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()">
+                <div class="icon">📷</div>
+                <div class="text">Tap to take a photo or upload an image of your notes</div>
+            </div>
+            <input type="file" id="file-input" accept="image/*" style="display:none" onchange="handleFileSelect(event)">
+            <input type="text" class="input-field" id="deck-name-input" placeholder="Deck name (optional - AI will suggest one)">
+            <button class="btn btn-primary" id="upload-btn" onclick="uploadImage()" disabled>🧠 Generate Flashcards</button>
+        </div>
+
+        <!-- DECK VIEW -->
+        <div id="view-deck" class="view">
+            <div class="header">
+                <button class="header-back" onclick="showView('home')">← Back</button>
+                <h1 id="deck-title">Deck</h1>
+                <button class="btn-icon" onclick="confirmDeleteDeck()">🗑️</button>
+            </div>
+            <div class="deck-card mb-16" id="deck-info-card" style="cursor:default"></div>
+            <div style="display:flex;gap:12px;margin-bottom:16px;">
+                <button class="btn btn-primary" onclick="startStudy()" id="study-btn">📖 Study Now</button>
+            </div>
+            <h3 style="margin-bottom:12px;font-size:15px;">Cards</h3>
+            <div class="card-list" id="card-list"></div>
+        </div>
+
+        <!-- STUDY -->
+        <div id="view-study" class="view">
+            <div class="header">
+                <button class="header-back" onclick="confirmQuitStudy()">✕</button>
+                <h1>📖 Study</h1>
+                <div></div>
+            </div>
+            <div class="study-progress">
+                <div class="study-progress-bar"><div class="study-progress-fill" id="study-progress-fill" style="width:0%"></div></div>
+                <div class="count" id="study-count">0/0</div>
+            </div>
+            <div id="study-card-area"></div>
+            <div class="study-actions" id="study-actions">
+                <button class="btn btn-danger" onclick="markCard(false)">❌ Didn't Know</button>
+                <button class="btn btn-success" onclick="markCard(true)">✅ Got It!</button>
+            </div>
+        </div>
+
+        <!-- RESULTS -->
+        <div id="view-results" class="view">
+            <div class="results">
+                <div class="icon" style="font-size:64px;margin-bottom:16px;" id="results-emoji">🎉</div>
+                <div class="score" id="results-score">0/0</div>
+                <div class="score-label" id="results-label">Correct</div>
+                <div class="xp-earned" id="results-xp">+0 XP</div>
+                <div class="streak-info" id="results-streak"></div>
+                <button class="btn btn-primary mb-12" onclick="startStudy()">🔄 Study Again</button>
+                <button class="btn btn-secondary" onclick="openDeck(currentDeckId)">← Back to Deck</button>
+            </div>
+        </div>
+
+        <!-- ACHIEVEMENTS -->
+        <div id="view-achievements" class="view">
+            <div class="header">
+                <button class="header-back" onclick="showView('home')">← Back</button>
+                <h1>🏆 Achievements</h1>
+                <div></div>
+            </div>
+            <div class="achievement-list" id="achievement-list"></div>
+        </div>
+
+        <!-- SETTINGS -->
+        <div id="view-settings" class="view">
+            <div class="header">
+                <button class="header-back" onclick="showView('home')">← Back</button>
+                <h1>⚙️ Settings</h1>
+                <div></div>
+            </div>
+            <div class="setting-group">
+                <label>AI Model</label>
+                <select id="model-select" onchange="saveModel()">
+                    <option value="gemma4:31b-cloud">gemma4:31b-cloud (recommended)</option>
+                </select>
+            </div>
+            <div class="setting-group">
+                <label>Ollama Status</label>
+                <div id="ollama-status" style="font-size:14px;">Checking...</div>
+            </div>
+            <div class="setting-group" style="margin-top:20px;">
+                <label>About</label>
+                <p style="font-size:13px;color:var(--text2);">
+                    FlashLearn v1.0 — AI-powered flashcard app.<br>
+                    Snap a photo of your notes, AI creates quizzes.<br>
+                    Study smarter with spaced repetition.
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bottom Navigation -->
+    <div class="bottom-nav">
+        <button class="nav-item active" onclick="showView('home')" id="nav-home">
+            <span class="icon">🏠</span><span>Home</span>
+        </button>
+        <button class="nav-item camera-btn" onclick="showView('upload')" id="nav-upload">
+            <span class="icon">📸</span><span>Snap</span>
+        </button>
+        <button class="nav-item" onclick="showView('achievements')" id="nav-achievements">
+            <span class="icon">🏆</span><span>Awards</span>
+        </button>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div class="loading-overlay" id="loading-overlay" style="display:none;">
+        <div class="spinner"></div>
+        <div class="loading-text" id="loading-text">Processing image...</div>
+        <div class="loading-sub" id="loading-sub">AI is reading your notes and creating flashcards</div>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast" id="toast"></div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
