@@ -34,7 +34,20 @@
                     <div class="label">Total XP ⭐</div>
                 </div>
             </div>
-            <div class="deck-list" id="deck-list"></div>
+
+            <div id="home-content">
+                <!-- Folders and unassigned decks render here -->
+            </div>
+        </div>
+
+        <!-- FOLDER VIEW (decks inside a folder) -->
+        <div id="view-folder" class="view">
+            <div class="header">
+                <button class="header-back" onclick="showView('home')">← Back</button>
+                <h1 id="folder-title">📁 Folder</h1>
+                <button class="btn-icon" onclick="confirmDeleteFolder()">🗑️</button>
+            </div>
+            <div class="deck-list" id="folder-deck-list"></div>
         </div>
 
         <!-- UPLOAD -->
@@ -44,19 +57,47 @@
                 <h1>📸 New Deck</h1>
                 <div></div>
             </div>
+
             <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()">
                 <div class="icon">📷</div>
-                <div class="text">Tap to take a photo or upload an image of your notes</div>
+                <div class="text">Tap to select one or more photos of your notes</div>
+                <div class="text text-sm" style="margin-top:4px;">You can select multiple images</div>
             </div>
-            <input type="file" id="file-input" accept="image/*" style="display:none" onchange="handleFileSelect(event)">
+            <input type="file" id="file-input" accept="image/*" multiple style="display:none" onchange="handleFileSelect(event)">
+
+            <div class="thumb-strip" id="thumb-strip"></div>
+
+            <select class="input-field" id="folder-select">
+                <option value="">No folder (uncategorized)</option>
+            </select>
+
             <input type="text" class="input-field" id="deck-name-input" placeholder="Deck name (optional - AI will suggest one)">
-            <button class="btn btn-primary" id="upload-btn" onclick="uploadImage()" disabled>🧠 Generate Flashcards</button>
+
+            <button class="btn btn-primary" id="upload-btn" onclick="uploadImages()" disabled>
+                🧠 Generate Flashcards
+            </button>
+        </div>
+
+        <!-- CREATE FOLDER -->
+        <div id="view-create-folder" class="view">
+            <div class="header">
+                <button class="header-back" onclick="showView('home')">← Back</button>
+                <h1>📁 New Folder</h1>
+                <div></div>
+            </div>
+
+            <input type="text" class="input-field" id="folder-name-input" placeholder="Folder name (e.g. Chemistry, History)">
+            <div class="icon-picker">
+                <label style="font-size:13px;color:var(--text2);display:block;margin-bottom:8px;">Choose an icon</label>
+                <div class="icon-grid" id="icon-grid"></div>
+            </div>
+            <button class="btn btn-primary" onclick="createFolder()">Create Folder</button>
         </div>
 
         <!-- DECK VIEW -->
         <div id="view-deck" class="view">
             <div class="header">
-                <button class="header-back" onclick="showView('home')">← Back</button>
+                <button class="header-back" id="deck-back-btn" onclick="deckBack()">← Back</button>
                 <h1 id="deck-title">Deck</h1>
                 <button class="btn-icon" onclick="confirmDeleteDeck()">🗑️</button>
             </div>
@@ -129,8 +170,8 @@
             <div class="setting-group" style="margin-top:20px;">
                 <label>About</label>
                 <p style="font-size:13px;color:var(--text2);">
-                    FlashLearn v1.0 — AI-powered flashcard app.<br>
-                    Snap a photo of your notes, AI creates quizzes.<br>
+                    FlashLearn v1.1 — AI-powered flashcard app.<br>
+                    Snap photos of your notes, AI creates quizzes.<br>
                     Study smarter with spaced repetition.
                 </p>
             </div>

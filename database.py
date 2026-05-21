@@ -9,14 +9,25 @@ from typing import Optional, List, Dict
 DB_PATH = Path(__file__).parent / "data" / "flashlearn.db"
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS folders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    icon TEXT DEFAULT '📁',
+    color TEXT DEFAULT '',
+    sort_order INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS decks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    folder_id INTEGER,
     name TEXT NOT NULL,
     subject TEXT DEFAULT '',
     description TEXT DEFAULT '',
     image_path TEXT,
     card_count INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS cards (
@@ -104,6 +115,8 @@ ACHIEVEMENT_DEFS = [
     ("Speed Demon", "Complete a speed round", "⏱️", 13),
 ]
 
+FOLDER_COLORS = ["#6c63ff", "#00d2ff", "#00e676", "#ff9100", "#ff1744", "#ffd700", "#e040fb", "#00bfa5"]
+
 
 class Database:
     def __init__(self):
@@ -120,6 +133,10 @@ class Database:
     def _init_db(self):
         conn = self._conn()
         conn.executescript(SCHEMA)
+        # Add folder_id column to existing decks table if missing (migration)
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(decks)").fetchall()]
+        if "folder_id" not in cols:
+            conn.execute("ALTER TABLE decks ADD COLUMN folder_id INTEGER REFERENCES folders(id) ON DELETE SET NULL")
         count = conn.execute("SELECT COUNT(*) FROM achievements").fetchone()[0]
         if count == 0:
             conn.executemany(
@@ -138,21 +155,83 @@ class Database:
 
     def set_setting(self, key: str, value: str):
         conn = self._conn()
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value)
-        )
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
         conn.commit()
         conn.close()
 
     def get_model(self) -> str:
         return self.get_setting("model", "gemma4:31b-cloud")
 
+    # ── Folders ───────────────────────────────────────────────
+    def create_folder(self, name: str, icon: str = "📁", color: str = "") -> int:
+        conn = self._conn()
+        count = conn.execute("SELECT COUNT(*) FROM folders").fetchone()[0]
+        if not color:
+            color = FOLDER_COLORS[count % len(FOLDER_COLORS)]
+        cur = conn.execute(
+            "INSERT INTO folders (name, icon, color, sort_order) VALUES (?, ?, ?, ?)",
+            (name, icon, color, count),
+        )
+        folder_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        return folder_id
+
+    def get_folders(self) -> List[Dict]:
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT f.*, "
+            "(SELECT COUNT(*) FROM decks WHERE folder_id=f.id) as deck_count, "
+            "(SELECT COALESCE(SUM(card_count), 0) FROM decks WHERE folder_id=f.id) as card_count "
+            "FROM folders f ORDER BY f.sort_order, f.name"
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def get_folder(self, folder_id: int) -> Optional[Dict]:
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT f.*, "
+            "(SELECT COUNT(*) FROM decks WHERE folder_id=f.id) as deck_count "
+            "FROM folders f WHERE f.id=?",
+            (folder_id,),
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def update_folder(self, folder_id: int, name: str = None, icon: str = None, color: str = None):
+        conn = self._conn()
+        parts = []
+        vals = []
+        if name is not None:
+            parts.append("name=?")
+            vals.append(name)
+        if icon is not None:
+            parts.append("icon=?")
+            vals.append(icon)
+        if color is not None:
+            parts.append("color=?")
+            vals.append(color)
+        if parts:
+            vals.append(folder_id)
+            conn.execute(f"UPDATE folders SET {', '.join(parts)} WHERE id=?", vals)
+            conn.commit()
+        conn.close()
+
+    def delete_folder(self, folder_id: int):
+        conn = self._conn()
+        # Decks in this folder get folder_id set to NULL (ON DELETE SET NULL)
+        conn.execute("DELETE FROM folders WHERE id=?", (folder_id,))
+        conn.commit()
+        conn.close()
+
     # ── Decks ─────────────────────────────────────────────────
-    def create_deck(self, name: str, subject: str = "", description: str = "", image_path: str = None) -> int:
+    def create_deck(self, name: str, subject: str = "", description: str = "",
+                    image_path: str = None, folder_id: int = None) -> int:
         conn = self._conn()
         cur = conn.execute(
-            "INSERT INTO decks (name, subject, description, image_path) VALUES (?, ?, ?, ?)",
-            (name, subject, description, image_path),
+            "INSERT INTO decks (folder_id, name, subject, description, image_path) VALUES (?, ?, ?, ?, ?)",
+            (folder_id, name, subject, description, image_path),
         )
         deck_id = cur.lastrowid
         conn.commit()
@@ -160,13 +239,34 @@ class Database:
         self._check_achievements()
         return deck_id
 
-    def get_decks(self) -> List[Dict]:
+    def get_decks(self, folder_id: int = None) -> List[Dict]:
+        conn = self._conn()
+        if folder_id is not None:
+            rows = conn.execute(
+                "SELECT d.*, "
+                "(SELECT COUNT(*) FROM cards WHERE deck_id=d.id) as card_count, "
+                "(SELECT COUNT(*) FROM cards WHERE deck_id=d.id AND next_review <= datetime('now')) as due_count "
+                "FROM decks d WHERE d.folder_id=? ORDER BY d.created_at DESC",
+                (folder_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT d.*, "
+                "(SELECT COUNT(*) FROM cards WHERE deck_id=d.id) as card_count, "
+                "(SELECT COUNT(*) FROM cards WHERE deck_id=d.id AND next_review <= datetime('now')) as due_count "
+                "FROM decks d ORDER BY d.created_at DESC"
+            ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def get_unassigned_decks(self) -> List[Dict]:
+        """Get decks not in any folder."""
         conn = self._conn()
         rows = conn.execute(
             "SELECT d.*, "
             "(SELECT COUNT(*) FROM cards WHERE deck_id=d.id) as card_count, "
             "(SELECT COUNT(*) FROM cards WHERE deck_id=d.id AND next_review <= datetime('now')) as due_count "
-            "FROM decks d ORDER BY d.created_at DESC"
+            "FROM decks d WHERE d.folder_id IS NULL ORDER BY d.created_at DESC"
         ).fetchall()
         conn.close()
         return [dict(r) for r in rows]
@@ -196,6 +296,12 @@ class Database:
         conn = self._conn()
         count = conn.execute("SELECT COUNT(*) FROM cards WHERE deck_id=?", (deck_id,)).fetchone()[0]
         conn.execute("UPDATE decks SET card_count=? WHERE id=?", (count, deck_id))
+        conn.commit()
+        conn.close()
+
+    def move_deck_to_folder(self, deck_id: int, folder_id: int = None):
+        conn = self._conn()
+        conn.execute("UPDATE decks SET folder_id=? WHERE id=?", (folder_id, deck_id))
         conn.commit()
         conn.close()
 
@@ -255,11 +361,9 @@ class Database:
         if not row:
             conn.close()
             return {}
-
         reps = row["repetitions"]
         ease = row["ease_factor"]
         interval = row["interval_days"]
-
         if correct:
             if reps == 0:
                 interval = 1
@@ -273,9 +377,7 @@ class Database:
             reps = 0
             interval = 1
             ease = max(1.3, ease - 0.2)
-
         next_review = (datetime.utcnow() + timedelta(days=interval)).isoformat()
-
         conn.execute(
             "UPDATE cards SET next_review=?, interval_days=?, ease_factor=?, repetitions=? WHERE id=?",
             (next_review, interval, ease, reps, card_id),
@@ -329,17 +431,14 @@ class Database:
         row = conn.execute("SELECT last_active FROM progress WHERE id=1").fetchone()
         today = datetime.utcnow().strftime("%Y-%m-%d")
         last = row["last_active"] if row["last_active"] else ""
-
         if last == today:
             conn.close()
             return
-
         yesterday = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
         if last == yesterday:
             conn.execute("UPDATE progress SET current_streak = current_streak + 1")
         elif last != today:
             conn.execute("UPDATE progress SET current_streak = 1")
-
         conn.execute(
             "UPDATE progress SET longest_streak = MAX(longest_streak, current_streak), "
             "last_active=?, total_sessions = total_sessions + 1",
@@ -374,7 +473,6 @@ class Database:
         progress = self.get_progress()
         total_cards = self._total_card_count()
         deck_count = self._deck_count()
-
         checks = {
             "First Deck": deck_count >= 1,
             "Card Collector": total_cards >= 25,
@@ -388,7 +486,6 @@ class Database:
             "Level 5": progress["level"] >= 5,
             "Level 10": progress["level"] >= 10,
         }
-
         newly_unlocked = []
         for name, condition in checks.items():
             if condition and self.unlock_achievement(name):

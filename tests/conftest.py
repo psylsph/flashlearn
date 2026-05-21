@@ -5,58 +5,68 @@ from unittest.mock import patch
 
 import pytest
 
-# Make sure we can import from parent dir
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from database import Database
+import database as db_module
+
+# Create temp DB for tests
+tmp = tempfile.mkdtemp()
+test_db_path = os.path.join(tmp, "test.db")
 
 
 @pytest.fixture
-def db(tmp_path):
-    """Create a fresh test database in a temp directory."""
-    db_path = tmp_path / "test_flashlearn.db"
-    with patch("database.DB_PATH", db_path):
-        db = Database()
-        # Override the path since __init__ already ran with the patched path
-        yield db
+def db():
+    """Fresh Database instance per test with temp DB."""
+    # Patch DB_PATH
+    original = db_module.DB_PATH
+    db_module.DB_PATH = test_db_path
+    d = db_module.Database()
+    yield d
+    # Cleanup
+    if os.path.exists(test_db_path):
+        os.unlink(test_db_path)
+    db_module.DB_PATH = original
 
 
 @pytest.fixture
 def db_with_deck(db):
-    """Create a database with one deck."""
-    deck_id = db.create_deck(name="Test Deck", subject="Biology")
-    return db, deck_id
+    """Database with one empty deck."""
+    did = db.create_deck(name="Test Deck", subject="Testing")
+    return db, did
 
 
 @pytest.fixture
-def db_with_cards(db_with_deck):
-    """Create a database with a deck and some cards."""
-    db, deck_id = db_with_deck
-    card_ids = []
+def db_with_cards(db):
+    """Database with a deck containing 5 flashcards."""
+    did = db.create_deck(name="Cards Deck", subject="Mixed")
+    cids = []
     for i in range(5):
-        cid = db.add_card(
-            deck_id=deck_id,
-            question=f"Question {i+1}?",
-            answer=f"Answer {i+1}",
-            card_type="flashcard",
-            difficulty=i % 5 + 1,
-        )
-        card_ids.append(cid)
-    return db, deck_id, card_ids
+        cid = db.add_card(did, f"Question {i}?", f"Answer {i}",
+                          card_type="flashcard" if i % 2 == 0 else "multiple_choice",
+                          options=["A", "B", "C", "D"] if i % 2 == 1 else [])
+        cids.append(cid)
+    return db, did, cids
 
 
 @pytest.fixture
 def sample_png_bytes():
-    """Minimal valid PNG file bytes."""
+    """Minimal valid PNG image bytes."""
     import struct
     import zlib
-    # 1x1 white pixel PNG
-    signature = b'\x89PNG\r\n\x1a\n'
-    def chunk(ctype, data):
-        c = ctype + data
-        return struct.pack('>I', len(data)) + c + struct.pack('>I', zlib.crc32(c) & 0xffffffff)
-    ihdr = chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0))
-    raw = zlib.compress(b'\x00\xff\xff\xff')
-    idat = chunk(b'IDAT', raw)
-    iend = chunk(b'IEND', b'')
-    return signature + ihdr + idat + iend
+
+    def make_png():
+        signature = b'\x89PNG\r\n\x1a\n'
+        # IHDR: 1x1, 8-bit RGB
+        ihdr_data = struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0)
+        ihdr_crc = zlib.crc32(b'IHDR' + ihdr_data) & 0xffffffff
+        ihdr = struct.pack('>I', 13) + b'IHDR' + ihdr_data + struct.pack('>I', ihdr_crc)
+        # IDAT: single white pixel
+        raw = zlib.compress(b'\x00\xff\xff\xff')
+        idat_crc = zlib.crc32(b'IDAT' + raw) & 0xffffffff
+        idat = struct.pack('>I', len(raw)) + b'IDAT' + raw + struct.pack('>I', idat_crc)
+        # IEND
+        iend_crc = zlib.crc32(b'IEND') & 0xffffffff
+        iend = struct.pack('>I', 0) + b'IEND' + struct.pack('>I', iend_crc)
+        return signature + ihdr + idat + iend
+
+    return make_png()

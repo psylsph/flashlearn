@@ -1,12 +1,21 @@
 // ── State ────────────────────────────────────────────────────
 let currentDeckId = null;
+let currentFolderId = null;
+let currentFolderName = '';
 let studyCards = [];
 let studyIndex = 0;
 let studyCorrect = 0;
-let selectedFile = null;
+let selectedFiles = [];
 let currentCard = null;
 let studyStartTime = 0;
 let currentView = 'home';
+let deckCameFromFolder = false;
+
+const FOLDER_ICONS = [
+    '📁', '📚', '🧪', '🔬', '🧬', '📐', '🧮', '🌍',
+    '🏛️', '⚔️', '🎨', '🎵', '💻', '🚀', '🧠', '📝',
+    '🌿', '⚡', '🔥', '💎', '🎯', '🏆', '🌟', '❤️',
+];
 
 // ── API Helpers ──────────────────────────────────────────────
 async function api(url, opts = {}) {
@@ -28,10 +37,11 @@ function showView(name) {
     const navMap = { home: 'nav-home', upload: 'nav-upload', achievements: 'nav-achievements' };
     const navEl = document.getElementById(navMap[name]);
     if (navEl) navEl.classList.add('active');
-    if (name === 'home') loadHome();
+    if (name === 'home') { loadHome(); currentFolderId = null; }
     if (name === 'achievements') loadAchievements();
     if (name === 'settings') loadSettings();
     if (name === 'upload') resetUpload();
+    if (name === 'create-folder') initFolderCreator();
 }
 
 // ── Toast ────────────────────────────────────────────────────
@@ -46,8 +56,23 @@ function showToast(msg, type = 'success', duration = 2500) {
 function showLoading(text, sub) {
     document.getElementById('loading-text').textContent = text || 'Loading...';
     document.getElementById('loading-sub').textContent = sub || '';
+    // Remove any old progress line
+    const old = document.getElementById('loading-progress');
+    if (old) old.remove();
     document.getElementById('loading-overlay').style.display = 'flex';
 }
+
+function updateLoadingProgress(current, total) {
+    let el = document.getElementById('loading-progress');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'loading-progress';
+        el.className = 'loading-progress';
+        document.getElementById('loading-overlay').appendChild(el);
+    }
+    el.textContent = `Image ${current} of ${total}`;
+}
+
 function hideLoading() {
     document.getElementById('loading-overlay').style.display = 'none';
 }
@@ -55,73 +80,273 @@ function hideLoading() {
 // ── Home ─────────────────────────────────────────────────────
 async function loadHome() {
     try {
-        const [progress, decks] = await Promise.all([
+        const [progress, folders, unassigned] = await Promise.all([
             api('/api/progress'),
-            api('/api/decks'),
+            api('/api/folders'),
+            api('/api/decks/unassigned'),
         ]);
+
+        // Stats
         const level = progress.level;
         const xpInLevel = progress.total_xp - progress.xp_current_level;
         const xpNeeded = progress.xp_next_level - progress.xp_current_level;
         const pct = xpNeeded > 0 ? Math.min(100, (xpInLevel / xpNeeded) * 100) : 100;
-
         document.getElementById('stat-level').textContent = level;
         document.getElementById('stat-streak').textContent = progress.current_streak;
         document.getElementById('stat-reviewed').textContent = progress.total_cards_reviewed;
         document.getElementById('stat-xp').textContent = progress.total_xp;
         document.getElementById('xp-bar').style.width = pct + '%';
 
-        const list = document.getElementById('deck-list');
+        const content = document.getElementById('home-content');
+        let html = '';
+
+        // Folders section
+        if (folders.folders.length > 0) {
+            html += `<div class="section-title">Subjects</div>`;
+            html += `<div class="folder-grid">`;
+            for (const f of folders.folders) {
+                html += `
+                    <div class="folder-card" style="--fc:${f.color || 'var(--primary)'}" onclick="openFolder(${f.id})">
+                        <div style="position:absolute;top:0;left:0;right:0;height:4px;background:${f.color || 'var(--primary)'}"></div>
+                        <div class="folder-icon">${f.icon}</div>
+                        <div class="folder-name">${esc(f.name)}</div>
+                        <div class="folder-meta">${f.deck_count} decks · ${f.card_count} cards</div>
+                    </div>`;
+            }
+            html += `
+                <div class="add-folder-card" onclick="showView('create-folder')">
+                    <div class="icon">➕</div>
+                    <div class="text">New Folder</div>
+                </div>`;
+            html += `</div>`;
+        } else {
+            html += `
+                <div class="folder-grid">
+                    <div class="add-folder-card" onclick="showView('create-folder')">
+                        <div class="icon">➕</div>
+                        <div class="text">New Subject Folder</div>
+                    </div>
+                </div>`;
+        }
+
+        // Unassigned decks
+        if (unassigned.decks.length > 0) {
+            html += `<div class="section-title">Uncategorized Decks</div>`;
+            html += `<div class="deck-list">`;
+            for (const d of unassigned.decks) {
+                html += renderDeckCard(d);
+            }
+            html += `</div>`;
+        }
+
+        content.innerHTML = html;
+    } catch (e) { console.error(e); }
+}
+
+function renderDeckCard(d) {
+    return `
+        <div class="deck-card" onclick="openDeck(${d.id})">
+            <div class="deck-name">${esc(d.name)}</div>
+            ${d.subject ? `<div class="deck-subject">${esc(d.subject)}</div>` : ''}
+            <div class="deck-meta">
+                <span>🃏 ${d.card_count} cards</span>
+                ${d.due_count > 0 ? `<span class="badge badge-due">${d.due_count} due</span>` : ''}
+                ${d.mastered_count > 0 ? `<span class="badge badge-mastered">${d.mastered_count} mastered</span>` : ''}
+            </div>
+        </div>`;
+}
+
+// ── Folders ──────────────────────────────────────────────────
+async function openFolder(folderId) {
+    currentFolderId = folderId;
+    deckCameFromFolder = true;
+    showView('folder');
+
+    try {
+        const [folder, decks] = await Promise.all([
+            api('/api/folders'),  // get all, pick ours
+            api(`/api/decks?folder_id=${folderId}`),
+        ]);
+
+        const f = folder.folders.find(x => x.id === folderId);
+        if (!f) { showView('home'); return; }
+
+        currentFolderName = f.name;
+        document.getElementById('folder-title').textContent = `${f.icon} ${f.name}`;
+
+        const list = document.getElementById('folder-deck-list');
         if (decks.decks.length === 0) {
-            list.innerHTML = `<div class="empty-state"><div class="icon">📸</div><div class="text">No decks yet!<br>Tap the camera button to snap your notes and create your first deck.</div></div>`;
+            list.innerHTML = `<div class="empty-state">
+                <div class="icon">📸</div>
+                <div class="text">No decks in this folder yet.<br>Tap the camera button to add one.</div>
+            </div>`;
             return;
         }
-        list.innerHTML = decks.decks.map(d => `
-            <div class="deck-card" onclick="openDeck(${d.id})">
-                <div class="deck-name">${esc(d.name)}</div>
-                ${d.subject ? `<div class="deck-subject">${esc(d.subject)}</div>` : ''}
-                <div class="deck-meta">
-                    <span>🃏 ${d.card_count} cards</span>
-                    ${d.due_count > 0 ? `<span class="badge badge-due">${d.due_count} due</span>` : ''}
-                    ${d.mastered_count > 0 ? `<span class="badge badge-mastered">${d.mastered_count} mastered</span>` : ''}
-                </div>
-            </div>`).join('');
-    } catch (e) { console.error(e); }
+
+        list.innerHTML = decks.decks.map(d => renderDeckCard(d)).join('');
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
+}
+
+function confirmDeleteFolder() {
+    if (confirm(`Delete "${currentFolderName}" folder? Decks inside will be moved to uncategorized.`)) {
+        deleteFolder();
+    }
+}
+
+async function deleteFolder() {
+    try {
+        await api(`/api/folders/${currentFolderId}`, { method: 'DELETE' });
+        showToast('Folder deleted', 'success');
+        showView('home');
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+function initFolderCreator() {
+    document.getElementById('folder-name-input').value = '';
+    const grid = document.getElementById('icon-grid');
+    grid.innerHTML = FOLDER_ICONS.map((icon, i) =>
+        `<div class="icon-option ${i === 0 ? 'selected' : ''}" onclick="selectIcon(this)" data-icon="${icon}">${icon}</div>`
+    ).join('');
+}
+
+function selectIcon(el) {
+    document.querySelectorAll('.icon-option').forEach(o => o.classList.remove('selected'));
+    el.classList.add('selected');
+}
+
+async function createFolder() {
+    const name = document.getElementById('folder-name-input').value.trim();
+    if (!name) { showToast('Please enter a folder name', 'error'); return; }
+
+    const selected = document.querySelector('.icon-option.selected');
+    const icon = selected ? selected.dataset.icon : '📁';
+
+    try {
+        await api('/api/folders', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: `name=${encodeURIComponent(name)}&icon=${encodeURIComponent(icon)}`,
+        });
+        showToast(`Created "${name}" folder`, 'success');
+        showView('home');
+    } catch (e) { showToast(e.message, 'error'); }
 }
 
 // ── Upload ───────────────────────────────────────────────────
 function resetUpload() {
-    selectedFile = null;
+    selectedFiles = [];
     document.getElementById('file-input').value = '';
     document.getElementById('deck-name-input').value = '';
     document.getElementById('upload-btn').disabled = true;
+    document.getElementById('thumb-strip').innerHTML = '';
     const zone = document.getElementById('upload-zone');
     zone.classList.remove('has-image');
-    zone.innerHTML = `<div class="icon">📷</div><div class="text">Tap to take a photo or upload an image of your notes</div>`;
+    zone.innerHTML = `
+        <div class="icon">📷</div>
+        <div class="text">Tap to select one or more photos of your notes</div>
+        <div class="text text-sm" style="margin-top:4px;">You can select multiple images</div>`;
+    loadFolderSelect();
+}
+
+async function loadFolderSelect() {
+    try {
+        const folders = await api('/api/folders');
+        const select = document.getElementById('folder-select');
+        select.innerHTML = '<option value="">No folder (uncategorized)</option>';
+        for (const f of folders.folders) {
+            const sel = (currentFolderId && f.id === currentFolderId) ? ' selected' : '';
+            select.innerHTML += `<option value="${f.id}"${sel}>${f.icon} ${esc(f.name)}</option>`;
+        }
+    } catch (e) { console.error(e); }
 }
 
 function handleFileSelect(e) {
-    const file = e.target.files[0];
-    if (!file) return;
-    selectedFile = file;
-    const zone = document.getElementById('upload-zone');
-    zone.classList.add('has-image');
-    const reader = new FileReader();
-    reader.onload = (ev) => { zone.innerHTML = `<img src="${ev.target.result}" alt="Preview">`; };
-    reader.readAsDataURL(file);
-    document.getElementById('upload-btn').disabled = false;
+    const files = Array.from(e.target.files);
+    if (!files.length) return;
+
+    for (const file of files) {
+        // Avoid duplicates
+        if (!selectedFiles.find(f => f.name === file.name && f.size === file.size)) {
+            selectedFiles.push(file);
+        }
+    }
+
+    renderThumbnails();
+    document.getElementById('upload-btn').disabled = selectedFiles.length === 0;
 }
 
-async function uploadImage() {
-    if (!selectedFile) return;
-    showLoading('Processing image...', 'AI is reading your notes and creating flashcards');
+function renderThumbnails() {
+    const strip = document.getElementById('thumb-strip');
+    strip.innerHTML = selectedFiles.map((file, i) => {
+        const url = URL.createObjectURL(file);
+        return `
+            <div class="thumb-item" id="thumb-${i}">
+                <img src="${url}" alt="Preview">
+                <button class="thumb-remove" onclick="removeThumb(${i})">✕</button>
+            </div>`;
+    }).join('');
+
+    // Update upload zone
+    const zone = document.getElementById('upload-zone');
+    if (selectedFiles.length > 0) {
+        zone.innerHTML = `
+            <div class="icon">📷</div>
+            <div class="text">${selectedFiles.length} image${selectedFiles.length > 1 ? 's' : ''} selected — tap to add more</div>`;
+    }
+}
+
+function removeThumb(index) {
+    selectedFiles.splice(index, 1);
+    renderThumbnails();
+    document.getElementById('upload-btn').disabled = selectedFiles.length === 0;
+    if (selectedFiles.length === 0) {
+        const zone = document.getElementById('upload-zone');
+        zone.innerHTML = `
+            <div class="icon">📷</div>
+            <div class="text">Tap to select one or more photos of your notes</div>
+            <div class="text text-sm" style="margin-top:4px;">You can select multiple images</div>`;
+    }
+}
+
+async function uploadImages() {
+    if (!selectedFiles.length) return;
+
+    const total = selectedFiles.length;
+    const folderId = document.getElementById('folder-select').value;
+
+    if (total === 1) {
+        // Single image - use original simple flow
+        showLoading('Processing image...', 'AI is reading your notes and creating flashcards');
+    } else {
+        showLoading(`Processing ${total} images...`, 'AI is reading your notes and creating flashcards');
+    }
+
     const formData = new FormData();
-    formData.append('photo', selectedFile);
+    for (const file of selectedFiles) {
+        formData.append('photos', file);
+    }
     formData.append('deck_name', document.getElementById('deck-name-input').value.trim());
+    if (folderId) formData.append('folder_id', folderId);
+
     try {
         const result = await api('/api/upload', { method: 'POST', body: formData });
         hideLoading();
         currentDeckId = result.deck.id;
-        showToast(`Created "${result.deck.name}" with ${result.cards.length} cards!`, 'success');
+        deckCameFromFolder = !!folderId;
+        currentFolderId = folderId ? parseInt(folderId) : null;
+
+        let msg = `Created "${result.deck.name}" with ${result.cards.length} cards!`;
+        if (result.images_processed > 1) {
+            msg = `Processed ${result.images_processed} images — ${result.cards.length} cards created!`;
+        }
+        showToast(msg, 'success');
+
+        if (result.errors && result.errors.length > 0) {
+            setTimeout(() => showToast(`${result.errors.length} image(s) had issues`, 'error', 4000), 2600);
+        }
+
         openDeck(result.deck.id);
     } catch (e) {
         hideLoading();
@@ -133,10 +358,12 @@ async function uploadImage() {
 async function openDeck(deckId) {
     currentDeckId = deckId;
     showView('deck');
+
     try {
         const data = await api(`/api/decks/${deckId}`);
         const deck = data.deck;
         document.getElementById('deck-title').textContent = deck.name;
+
         const dueCount = deck.due_count || 0;
         const masteredCount = deck.mastered_count || 0;
         document.getElementById('deck-info-card').innerHTML = `
@@ -147,6 +374,7 @@ async function openDeck(deckId) {
                 ${dueCount > 0 ? `<span class="badge badge-due">${dueCount} due</span>` : ''}
                 ${masteredCount > 0 ? `<span class="badge badge-mastered">${masteredCount} mastered</span>` : ''}
             </div>`;
+
         const list = document.getElementById('card-list');
         if (data.cards.length === 0) {
             list.innerHTML = '<div class="empty-state"><div class="text">No cards yet</div></div>';
@@ -158,8 +386,19 @@ async function openDeck(deckId) {
                 <span class="type-badge">${c.card_type.replace('_', ' ')}</span>
                 <button class="delete-btn" onclick="deleteCard(${c.id}, event)">🗑️</button>
             </div>`).join('');
-        document.getElementById('study-btn').textContent = dueCount > 0 ? `📖 Study ${dueCount} due cards` : '📖 Practice all cards';
+
+        document.getElementById('study-btn').textContent =
+            dueCount > 0 ? `📖 Study ${dueCount} due cards` : '📖 Practice all cards';
+
     } catch (e) { showToast(e.message, 'error'); }
+}
+
+function deckBack() {
+    if (deckCameFromFolder && currentFolderId) {
+        openFolder(currentFolderId);
+    } else {
+        showView('home');
+    }
 }
 
 async function deleteCard(cardId, e) {
@@ -179,7 +418,11 @@ async function deleteCurrentDeck() {
     try {
         await api(`/api/decks/${currentDeckId}`, { method: 'DELETE' });
         showToast('Deck deleted', 'success');
-        showView('home');
+        if (deckCameFromFolder && currentFolderId) {
+            openFolder(currentFolderId);
+        } else {
+            showView('home');
+        }
     } catch (e) { showToast(e.message, 'error'); }
 }
 
