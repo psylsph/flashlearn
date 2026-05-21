@@ -146,7 +146,10 @@ async function loadHome() {
 function renderDeckCard(d) {
     return `
         <div class="deck-card" onclick="openDeck(${d.id})">
-            <div class="deck-name">${esc(d.name)}</div>
+            <div class="deck-card-top">
+                <div class="deck-name">${esc(d.name)}</div>
+                <button class="btn-icon btn-sm-icon" onclick="event.stopPropagation(); showMovePicker(${d.id})" title="Move to folder">📁</button>
+            </div>
             ${d.subject ? `<div class="deck-subject">${esc(d.subject)}</div>` : ''}
             <div class="deck-meta">
                 <span>🃏 ${d.card_count} cards</span>
@@ -232,6 +235,56 @@ async function createFolder() {
         showToast(`Created "${name}" folder`, 'success');
         showView('home');
     } catch (e) { showToast(e.message, 'error'); }
+}
+
+// ── Move Deck to Folder ──────────────────────────────────────
+async function showMovePicker(deckId) {
+    try {
+        const data = await api('/api/folders');
+        const folders = data.folders;
+        if (folders.length === 0) {
+            showToast('Create a folder first', 'error');
+            return;
+        }
+
+        // Build a simple picker overlay
+        let existing = document.getElementById('move-picker-overlay');
+        if (existing) existing.remove();
+
+        const overlay = document.createElement('div');
+        overlay.id = 'move-picker-overlay';
+        overlay.className = 'move-picker-overlay';
+        overlay.innerHTML = `
+            <div class="move-picker">
+                <div class="move-picker-title">Move to folder</div>
+                <div class="move-picker-option" onclick="moveDeck(${deckId}, null)">
+                    <span>📂</span> <span>No folder</span>
+                </div>
+                ${folders.map(f => `
+                    <div class="move-picker-option" onclick="moveDeck(${deckId}, ${f.id})">
+                        <span>${f.icon}</span> <span>${esc(f.name)}</span>
+                    </div>`).join('')}
+                <div class="move-picker-option move-picker-cancel" onclick="closeMovePicker()">Cancel</div>
+            </div>`;
+        document.body.appendChild(overlay);
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function moveDeck(deckId, folderId) {
+    closeMovePicker();
+    try {
+        const params = folderId !== null ? `?folder_id=${folderId}` : '';
+        await api(`/api/decks/${deckId}/move${params}`, { method: 'PUT' });
+        showToast('Deck moved!', 'success');
+        // Refresh whatever view we're on
+        if (currentView === 'home') loadHome();
+        else if (currentView === 'folder' && currentFolderId) openFolder(currentFolderId);
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+function closeMovePicker() {
+    const el = document.getElementById('move-picker-overlay');
+    if (el) el.remove();
 }
 
 // ── Upload ───────────────────────────────────────────────────
