@@ -2,7 +2,7 @@ import base64
 import json
 import re
 from io import BytesIO
-from typing import Dict
+from typing import Dict, List
 
 import httpx
 from PIL import Image
@@ -63,6 +63,24 @@ def resize_image(image_bytes: bytes, max_size: int = 1024) -> str:
     buf = BytesIO()
     img.save(buf, format="JPEG", quality=85)
     return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def pdf_to_images(pdf_bytes: bytes, max_pages: int = 20, dpi: int = 200) -> List[bytes]:
+    """Convert PDF pages to JPEG image bytes (one per page)."""
+    import fitz  # PyMuPDF
+
+    images = []
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    pages = min(len(doc), max_pages)
+    for i in range(pages):
+        page = doc[i]
+        zoom = dpi / 72  # 72 is default PDF DPI
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat)
+        img_bytes = pix.tobytes("jpeg")
+        images.append(img_bytes)
+    doc.close()
+    return images
 
 
 def generate_cards(image_base64: str, model: str = "gemma4:31b-cloud") -> Dict:

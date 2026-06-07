@@ -60,10 +60,16 @@
 
             <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()">
                 <div class="icon">📷</div>
-                <div class="text">Tap to select one or more photos of your notes</div>
-                <div class="text text-sm" style="margin-top:4px;">You can select multiple images</div>
+                <div class="text">Click to select photos or PDFs of your notes</div>
+                <div class="text text-sm" style="margin-top:4px;">Images and PDF files supported</div>
             </div>
-            <input type="file" id="file-input" accept="image/*" multiple style="display:none" onchange="handleFileSelect(event)">
+            <input type="file" id="file-input" accept="image/*,.pdf" multiple style="display:none" onchange="handleFileSelect(event)">
+
+            <div class="upload-divider"><span>or</span></div>
+
+            <button class="btn btn-secondary" onclick="openCamera()" style="margin-bottom:12px;">
+                🎥 Take Photo with Camera
+            </button>
 
             <div class="thumb-strip" id="thumb-strip"></div>
 
@@ -196,6 +202,19 @@
         <div class="spinner"></div>
         <div class="loading-text" id="loading-text">Processing image...</div>
         <div class="loading-sub" id="loading-sub">AI is reading your notes and creating flashcards</div>
+    </div>
+
+    <!-- Camera Overlay -->
+    <div class="camera-overlay" id="camera-overlay" style="display:none;">
+        <div class="camera-box">
+            <video id="camera-video" autoplay playsinline></video>
+            <canvas id="camera-canvas" style="display:none;"></canvas>
+            <div class="camera-controls">
+                <button class="btn btn-secondary" onclick="closeCamera()">Cancel</button>
+                <button class="camera-capture-btn" onclick="capturePhoto()">📸</button>
+                <div style="width:48px;"></div>
+            </div>
+        </div>
     </div>
 
     <!-- Toast -->

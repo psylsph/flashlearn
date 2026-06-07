@@ -298,8 +298,8 @@ function resetUpload() {
     zone.classList.remove('has-image');
     zone.innerHTML = `
         <div class="icon">📷</div>
-        <div class="text">Tap to select one or more photos of your notes</div>
-        <div class="text text-sm" style="margin-top:4px;">You can select multiple images</div>`;
+        <div class="text">Click to select photos or PDFs of your notes</div>
+        <div class="text text-sm" style="margin-top:4px;">Images and PDF files supported</div>`;
     loadFolderSelect();
 }
 
@@ -333,10 +333,14 @@ function handleFileSelect(e) {
 function renderThumbnails() {
     const strip = document.getElementById('thumb-strip');
     strip.innerHTML = selectedFiles.map((file, i) => {
+        const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
         const url = URL.createObjectURL(file);
+        const preview = isPdf
+            ? `<div class="thumb-pdf"><span>📄</span><small>${esc(file.name)}</small></div>`
+            : `<img src="${url}" alt="Preview">`;
         return `
             <div class="thumb-item" id="thumb-${i}">
-                <img src="${url}" alt="Preview">
+                ${preview}
                 <button class="thumb-remove" onclick="removeThumb(${i})">✕</button>
             </div>`;
     }).join('');
@@ -346,7 +350,7 @@ function renderThumbnails() {
     if (selectedFiles.length > 0) {
         zone.innerHTML = `
             <div class="icon">📷</div>
-            <div class="text">${selectedFiles.length} image${selectedFiles.length > 1 ? 's' : ''} selected — tap to add more</div>`;
+            <div class="text">${selectedFiles.length} file${selectedFiles.length > 1 ? 's' : ''} selected — click to add more</div>`;
     }
 }
 
@@ -358,8 +362,8 @@ function removeThumb(index) {
         const zone = document.getElementById('upload-zone');
         zone.innerHTML = `
             <div class="icon">📷</div>
-            <div class="text">Tap to select one or more photos of your notes</div>
-            <div class="text text-sm" style="margin-top:4px;">You can select multiple images</div>`;
+            <div class="text">Click to select photos or PDFs of your notes</div>
+            <div class="text text-sm" style="margin-top:4px;">Images and PDF files supported</div>`;
     }
 }
 
@@ -405,6 +409,54 @@ async function uploadImages() {
         hideLoading();
         showToast(e.message, 'error', 4000);
     }
+}
+
+// ── Camera (webcam capture for desktop) ──────────────────────
+let cameraStream = null;
+
+async function openCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        showToast('Camera not supported in this browser', 'error', 4000);
+        return;
+    }
+    try {
+        cameraStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }
+        });
+        const video = document.getElementById('camera-video');
+        video.srcObject = cameraStream;
+        document.getElementById('camera-overlay').style.display = 'flex';
+    } catch (e) {
+        let msg = 'Could not access camera';
+        if (e.name === 'NotAllowedError') msg = 'Camera permission denied. Allow camera access in your browser settings.';
+        else if (e.name === 'NotFoundError') msg = 'No camera found on this device';
+        showToast(msg, 'error', 4000);
+    }
+}
+
+function capturePhoto() {
+    const video = document.getElementById('camera-video');
+    const canvas = document.getElementById('camera-canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0);
+    canvas.toBlob(blob => {
+        const file = new File([blob], `photo-${Date.now()}.jpg`, { type: 'image/jpeg' });
+        selectedFiles.push(file);
+        renderThumbnails();
+        document.getElementById('upload-btn').disabled = selectedFiles.length === 0;
+        closeCamera();
+        showToast('Photo captured!', 'success');
+    }, 'image/jpeg', 0.9);
+}
+
+function closeCamera() {
+    if (cameraStream) {
+        cameraStream.getTracks().forEach(t => t.stop());
+        cameraStream = null;
+    }
+    document.getElementById('camera-overlay').style.display = 'none';
 }
 
 // ── Deck View ────────────────────────────────────────────────

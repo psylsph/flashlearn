@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from PIL import Image
 
 from database import Database
-from ai_service import resize_image, generate_cards, check_ollama_status
+from ai_service import resize_image, generate_cards, pdf_to_images, check_ollama_status
 
 app = FastAPI(title="FlashLearn")
 db = Database()
@@ -154,28 +154,65 @@ async def upload_and_process(
     errors = []
 
     for idx, photo in enumerate(photos):
-        image_bytes = await photo.read()
+        file_bytes = await photo.read()
 
-        if len(image_bytes) > 20_000_000:
-            errors.append(f"Image {idx+1} too large, skipped")
+        if len(file_bytes) > 20_000_000:
+            errors.append(f"File {idx+1} too large, skipped")
             continue
 
+        filename = photo.filename or ""
+        content_type = photo.content_type or ""
+        is_pdf = content_type == "application/pdf" or filename.lower().endswith(".pdf")
+
+        if is_pdf:
+            try:
+                page_images = pdf_to_images(file_bytes)
+            except Exception as e:
+                errors.append(f"PDF {idx+1} could not be read: {str(e)}")
+                continue
+            if not page_images:
+                errors.append(f"PDF {idx+1} has no pages, skipped")
+                continue
+
+            for page_idx, page_bytes in enumerate(page_images):
+                photo_filename = f"{uuid.uuid4().hex}_p{page_idx+1}.jpg"
+                photo_path = PHOTO_DIR / photo_filename
+                with open(photo_path, "wb") as f:
+                    f.write(page_bytes)
+                saved_photos.append(photo_filename)
+
+                image_base64 = resize_image(page_bytes)
+                result = generate_cards(image_base64, model)
+
+                if result.get("success"):
+                    all_cards.extend(result.get("cards", []))
+                    if not detected_subject and result.get("subject"):
+                        detected_subject = result["subject"]
+                    if not detected_deck_name and result.get("deck_name"):
+                        detected_deck_name = result["deck_name"]
+                    if not detected_description and result.get("description"):
+                        detected_description = result["description"]
+                else:
+                    errors.append(f"PDF {idx+1} page {page_idx+1}: {result.get('error', 'AI failed')}")
+            continue
+
+        # Image file
         try:
-            Image.open(BytesIO(image_bytes))
+            Image.open(BytesIO(file_bytes))
         except Exception:
-            errors.append(f"Image {idx+1} is not a valid image, skipped")
+            errors.append(f"File {idx+1} is not a valid image, skipped")
             continue
 
         # Save photo
-        ext = Path(photo.filename or "photo.jpg").suffix or ".jpg"
+        ext = Path(filename or "photo.jpg").suffix or ".jpg"
         photo_filename = f"{uuid.uuid4().hex}{ext}"
         photo_path = PHOTO_DIR / photo_filename
         with open(photo_path, "wb") as f:
-            f.write(image_bytes)
+            f.write(file_bytes)
         saved_photos.append(photo_filename)
 
         # Resize and encode for AI
-        image_base64 = resize_image(image_bytes)
+        image_base64 = resize_image(file_bytes)
 
         # Call AI
         result = generate_cards(image_base64, model)
