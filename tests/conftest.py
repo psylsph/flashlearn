@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -19,7 +20,7 @@ def db():
     """Fresh Database instance per test with temp DB."""
     # Patch DB_PATH
     original = db_module.DB_PATH
-    db_module.DB_PATH = test_db_path
+    db_module.DB_PATH = Path(test_db_path)
     d = db_module.Database()
     yield d
     # Cleanup

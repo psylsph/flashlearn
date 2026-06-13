@@ -4,6 +4,9 @@ services:
     network_mode: host
     environment:
       - PORT=5050
+      - OLLAMA_URL=http://localhost:11434
+      - PDF_MAX_PAGES=10
+      - PDF_DPI=150
     volumes:
       - flashlearn-data:/app/data
     restart: unless-stopped

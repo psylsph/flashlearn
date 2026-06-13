@@ -1,13 +1,35 @@
 import base64
 import json
+import logging
+import os
 import re
+import warnings
 from io import BytesIO
 from typing import Dict, List
 
 import httpx
-from PIL import Image
+from PIL import Image, ImageOps
 
-OLLAMA_URL = "http://localhost:11434"
+logger = logging.getLogger(__name__)
+
+Image.MAX_IMAGE_PIXELS = 25_000_000
+warnings.simplefilter("error", Image.DecompressionBombWarning)
+
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434").rstrip("/")
+MAX_TEXT_LENGTH = 2000
+MAX_METADATA_LENGTH = 200
+VALID_CARD_TYPES = {"flashcard", "multiple_choice", "fill_blank"}
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+DEFAULT_PDF_MAX_PAGES = env_int("PDF_MAX_PAGES", 10)
+DEFAULT_PDF_DPI = env_int("PDF_DPI", 150)
 
 EXTRACTION_PROMPT = """You are a study assistant for a student. The user has uploaded a photo of their study notes, worksheet, or textbook page.
 
@@ -54,33 +76,106 @@ Rules:
 """
 
 
-def resize_image(image_bytes: bytes, max_size: int = 1024) -> str:
-    """Resize image and return base64 encoded string."""
+def normalize_image(image_bytes: bytes, max_size: int = 1024) -> bytes:
+    """Validate, resize, and return normalized JPEG bytes."""
     img = Image.open(BytesIO(image_bytes))
-    if img.mode in ("RGBA", "P"):
+    img.load()
+    img = ImageOps.exif_transpose(img)
+    if img.mode != "RGB":
         img = img.convert("RGB")
     img.thumbnail((max_size, max_size), Image.LANCZOS)
     buf = BytesIO()
     img.save(buf, format="JPEG", quality=85)
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
+    return buf.getvalue()
 
 
-def pdf_to_images(pdf_bytes: bytes, max_pages: int = 20, dpi: int = 200) -> List[bytes]:
+def resize_image(image_bytes: bytes, max_size: int = 1024) -> str:
+    """Resize image and return base64 encoded string."""
+    return base64.b64encode(normalize_image(image_bytes, max_size)).decode("utf-8")
+
+
+def pdf_to_images(pdf_bytes: bytes, max_pages: int = DEFAULT_PDF_MAX_PAGES,
+                  dpi: int = DEFAULT_PDF_DPI) -> List[bytes]:
     """Convert PDF pages to JPEG image bytes (one per page)."""
+    return list(iter_pdf_images(pdf_bytes, max_pages, dpi))
+
+
+def iter_pdf_images(pdf_bytes: bytes, max_pages: int = DEFAULT_PDF_MAX_PAGES,
+                    dpi: int = DEFAULT_PDF_DPI):
+    """Yield PDF pages as JPEG image bytes without retaining all pages in memory."""
     import fitz  # PyMuPDF
 
-    images = []
+    max_pages = max(1, min(max_pages, 50))
+    dpi = max(72, min(dpi, 200))
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    pages = min(len(doc), max_pages)
-    for i in range(pages):
-        page = doc[i]
-        zoom = dpi / 72  # 72 is default PDF DPI
-        mat = fitz.Matrix(zoom, zoom)
-        pix = page.get_pixmap(matrix=mat)
-        img_bytes = pix.tobytes("jpeg")
-        images.append(img_bytes)
-    doc.close()
-    return images
+    try:
+        pages = min(len(doc), max_pages)
+        for i in range(pages):
+            page = doc[i]
+            zoom = dpi / 72  # 72 is default PDF DPI
+            mat = fitz.Matrix(zoom, zoom)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            img_bytes = pix.tobytes("jpeg")
+            yield img_bytes
+    finally:
+        doc.close()
+
+
+def _clean_text(value, max_length: int = MAX_TEXT_LENGTH) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip()[:max_length]
+
+
+def _clean_difficulty(value) -> int:
+    try:
+        difficulty = int(value)
+    except (TypeError, ValueError):
+        difficulty = 3
+    return max(1, min(5, difficulty))
+
+
+def validate_card(card) -> Dict | None:
+    """Validate and normalize a single AI-generated card."""
+    if not isinstance(card, dict):
+        return None
+
+    question = _clean_text(card.get("question"))
+    answer = _clean_text(card.get("answer"))
+    if not question or not answer:
+        return None
+
+    card_type = card.get("type") or card.get("card_type") or "flashcard"
+    if card_type not in VALID_CARD_TYPES:
+        card_type = "flashcard"
+
+    options = card.get("options", [])
+    if not isinstance(options, list):
+        options = []
+    options = [_clean_text(option, 500) for option in options]
+    options = [option for option in options if option]
+
+    if card_type == "multiple_choice":
+        if not options:
+            card_type = "flashcard"
+        else:
+            if answer not in options:
+                options.insert(0, answer)
+            # Keep order while removing duplicates.
+            options = list(dict.fromkeys(options))[:6]
+            if len(options) < 2:
+                card_type = "flashcard"
+
+    if card_type != "multiple_choice":
+        options = []
+
+    return {
+        "question": question,
+        "answer": answer,
+        "type": card_type,
+        "options": options,
+        "difficulty": _clean_difficulty(card.get("difficulty", 3)),
+    }
 
 
 def generate_cards(image_base64: str, model: str = "gemma4:31b-cloud") -> Dict:
@@ -119,19 +214,17 @@ def generate_cards(image_base64: str, model: str = "gemma4:31b-cloud") -> Dict:
 
         valid_cards = []
         for card in result["cards"]:
-            if "question" in card and "answer" in card:
-                card.setdefault("type", "flashcard")
-                card.setdefault("difficulty", 3)
-                if card["type"] == "multiple_choice":
-                    card.setdefault("options", [])
-                    if not card["options"]:
-                        card["type"] = "flashcard"
-                valid_cards.append(card)
+            validated = validate_card(card)
+            if validated:
+                valid_cards.append(validated)
 
         if not valid_cards:
             return {"success": False, "error": "No valid cards could be generated"}
 
         result["cards"] = valid_cards
+        result["subject"] = _clean_text(result.get("subject"), MAX_METADATA_LENGTH)
+        result["deck_name"] = _clean_text(result.get("deck_name"), MAX_METADATA_LENGTH)
+        result["description"] = _clean_text(result.get("description"), MAX_TEXT_LENGTH)
         result["success"] = True
         return result
 
@@ -140,6 +233,7 @@ def generate_cards(image_base64: str, model: str = "gemma4:31b-cloud") -> Dict:
     except httpx.TimeoutException:
         return {"success": False, "error": "AI request timed out. Try again."}
     except Exception as e:
+        logger.exception("Unexpected AI card generation error")
         return {"success": False, "error": f"AI error: {str(e)}"}
 
 

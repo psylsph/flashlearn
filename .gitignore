@@ -4,3 +4,4 @@ data/
 venv/
 .env
 *.db
+CODE_REVIEW.md

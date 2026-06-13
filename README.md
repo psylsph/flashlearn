@@ -59,6 +59,9 @@ On your phone (same WiFi): `http://<your-computer-ip>:5050`
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `5050` | Port the app runs on |
+| `OLLAMA_URL` | `http://localhost:11434` | Ollama API base URL |
+| `PDF_MAX_PAGES` | `10` | Maximum PDF pages processed per upload |
+| `PDF_DPI` | `150` | DPI used when rendering PDF pages |
 
 ### AI Model
 

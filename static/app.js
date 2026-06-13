@@ -7,9 +7,13 @@ let studyIndex = 0;
 let studyCorrect = 0;
 let selectedFiles = [];
 let currentCard = null;
+let studySessionId = null;
 let studyStartTime = 0;
 let currentView = 'home';
 let deckCameFromFolder = false;
+let thumbnailUrls = [];
+let reviewInFlight = false;
+let finishInFlight = false;
 
 const FOLDER_ICONS = [
     '📁', '📚', '🧪', '🔬', '🧬', '📐', '🧮', '🌍',
@@ -62,17 +66,6 @@ function showLoading(text, sub) {
     document.getElementById('loading-overlay').style.display = 'flex';
 }
 
-function updateLoadingProgress(current, total) {
-    let el = document.getElementById('loading-progress');
-    if (!el) {
-        el = document.createElement('div');
-        el.id = 'loading-progress';
-        el.className = 'loading-progress';
-        document.getElementById('loading-overlay').appendChild(el);
-    }
-    el.textContent = `Image ${current} of ${total}`;
-}
-
 function hideLoading() {
     document.getElementById('loading-overlay').style.display = 'none';
 }
@@ -106,9 +99,9 @@ async function loadHome() {
             html += `<div class="folder-grid">`;
             for (const f of folders.folders) {
                 html += `
-                    <div class="folder-card" style="--fc:${f.color || 'var(--primary)'}" onclick="openFolder(${f.id})">
-                        <div style="position:absolute;top:0;left:0;right:0;height:4px;background:${f.color || 'var(--primary)'}"></div>
-                        <div class="folder-icon">${f.icon}</div>
+                    <div class="folder-card" style="--fc:${safeColor(f.color)}" onclick="openFolder(${f.id})">
+                        <div style="position:absolute;top:0;left:0;right:0;height:4px;background:${safeColor(f.color)}"></div>
+                        <div class="folder-icon">${esc(f.icon)}</div>
                         <div class="folder-name">${esc(f.name)}</div>
                         <div class="folder-meta">${f.deck_count} decks · ${f.card_count} cards</div>
                     </div>`;
@@ -175,7 +168,7 @@ async function openFolder(folderId) {
         if (!f) { showView('home'); return; }
 
         currentFolderName = f.name;
-        document.getElementById('folder-title').textContent = `${f.icon} ${f.name}`;
+        document.getElementById('folder-title').textContent = `${f.icon || '📁'} ${f.name}`;
 
         const list = document.getElementById('folder-deck-list');
         if (decks.decks.length === 0) {
@@ -210,7 +203,7 @@ function initFolderCreator() {
     document.getElementById('folder-name-input').value = '';
     const grid = document.getElementById('icon-grid');
     grid.innerHTML = FOLDER_ICONS.map((icon, i) =>
-        `<div class="icon-option ${i === 0 ? 'selected' : ''}" onclick="selectIcon(this)" data-icon="${icon}">${icon}</div>`
+        `<div class="icon-option ${i === 0 ? 'selected' : ''}" onclick="selectIcon(this)" data-icon="${escAttr(icon)}">${esc(icon)}</div>`
     ).join('');
 }
 
@@ -262,7 +255,7 @@ async function showMovePicker(deckId) {
                 </div>
                 ${folders.map(f => `
                     <div class="move-picker-option" onclick="moveDeck(${deckId}, ${f.id})">
-                        <span>${f.icon}</span> <span>${esc(f.name)}</span>
+                        <span>${esc(f.icon)}</span> <span>${esc(f.name)}</span>
                     </div>`).join('')}
                 <div class="move-picker-option move-picker-cancel" onclick="closeMovePicker()">Cancel</div>
             </div>`;
@@ -289,6 +282,7 @@ function closeMovePicker() {
 
 // ── Upload ───────────────────────────────────────────────────
 function resetUpload() {
+    revokeThumbnailUrls();
     selectedFiles = [];
     document.getElementById('file-input').value = '';
     document.getElementById('deck-name-input').value = '';
@@ -310,7 +304,7 @@ async function loadFolderSelect() {
         select.innerHTML = '<option value="">No folder (uncategorized)</option>';
         for (const f of folders.folders) {
             const sel = (currentFolderId && f.id === currentFolderId) ? ' selected' : '';
-            select.innerHTML += `<option value="${f.id}"${sel}>${f.icon} ${esc(f.name)}</option>`;
+            select.innerHTML += `<option value="${f.id}"${sel}>${esc(f.icon)} ${esc(f.name)}</option>`;
         }
     } catch (e) { console.error(e); }
 }
@@ -331,10 +325,12 @@ function handleFileSelect(e) {
 }
 
 function renderThumbnails() {
+    revokeThumbnailUrls();
     const strip = document.getElementById('thumb-strip');
     strip.innerHTML = selectedFiles.map((file, i) => {
         const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
-        const url = URL.createObjectURL(file);
+        const url = isPdf ? '' : URL.createObjectURL(file);
+        if (url) thumbnailUrls.push(url);
         const preview = isPdf
             ? `<div class="thumb-pdf"><span>📄</span><small>${esc(file.name)}</small></div>`
             : `<img src="${url}" alt="Preview">`;
@@ -539,6 +535,7 @@ async function startStudy() {
     studyStartTime = Date.now();
     try {
         const data = await api(`/api/decks/${currentDeckId}/study`);
+        studySessionId = data.session_id;
         studyCards = data.cards;
         if (studyCards.length === 0) {
             showToast('No cards to study!', 'error');
@@ -554,6 +551,7 @@ async function startStudy() {
 
 function renderStudyCard() {
     if (studyIndex >= studyCards.length) { finishStudy(); return; }
+    reviewInFlight = false;
     currentCard = studyCards[studyIndex];
     const pct = (studyIndex / studyCards.length) * 100;
     document.getElementById('study-progress-fill').style.width = pct + '%';
@@ -578,6 +576,13 @@ function renderFlashcard(area) {
     document.getElementById('study-actions').style.display = 'flex';
 }
 
+function setStudyActionsDisabled(disabled) {
+    document.querySelectorAll('#study-actions button, .mc-option, #type-answer').forEach(el => {
+        if (el.tagName === 'BUTTON' || el.tagName === 'INPUT') el.disabled = disabled;
+        else el.style.pointerEvents = disabled ? 'none' : '';
+    });
+}
+
 function renderMultipleChoice(area) {
     const options = [...(currentCard.options || [])];
     if (!options.includes(currentCard.answer)) options.push(currentCard.answer);
@@ -590,12 +595,14 @@ function renderMultipleChoice(area) {
             <div class="flashcard-front" style="position:relative;min-height:120px;"><div class="question">${esc(currentCard.question)}</div></div>
         </div></div>
         <div class="mc-options">${options.map(o => `
-            <div class="mc-option" onclick="selectMcOption(this, '${escAttr(o)}')">${esc(o)}</div>`).join('')}
+            <div class="mc-option" data-answer="${escAttr(o)}" onclick="selectMcOption(this)">${esc(o)}</div>`).join('')}
         </div>`;
     document.getElementById('study-actions').style.display = 'none';
 }
 
-function selectMcOption(el, selected) {
+function selectMcOption(el) {
+    if (reviewInFlight) return;
+    const selected = el.dataset.answer || '';
     const options = document.querySelectorAll('.mc-option');
     if (el.classList.contains('correct') || el.classList.contains('wrong')) return;
     options.forEach(o => {
@@ -624,12 +631,17 @@ function renderFillBlank(area) {
 }
 
 function checkTypedAnswer() {
+    if (reviewInFlight) return;
     const input = document.getElementById('type-answer');
     if (!input) return;
     const typed = input.value.trim().toLowerCase();
     const correct = currentCard.answer.trim().toLowerCase();
     const feedback = document.getElementById('type-answer-feedback');
-    const isCorrect = typed === correct || correct.includes(typed) || typed.includes(correct);
+    const isCorrect = typed === correct || (
+        typed.length >= 3 &&
+        (correct.length >= 5 && typed.length >= Math.ceil(correct.length * 0.8) && correct.includes(typed)) ||
+        (typed.length >= 5 && correct.length >= Math.ceil(typed.length * 0.8) && typed.includes(correct))
+    );
     if (isCorrect) {
         feedback.className = 'type-answer-feedback correct';
         feedback.textContent = `✅ Correct! "${currentCard.answer}"`;
@@ -644,20 +656,34 @@ function checkTypedAnswer() {
 }
 
 async function markCard(correct) {
+    if (reviewInFlight || !currentCard) return;
+    reviewInFlight = true;
+    setStudyActionsDisabled(true);
     const timeMs = Date.now() - studyStartTime;
-    studyStartTime = Date.now();
-    if (correct) studyCorrect++;
     try {
-        const result = await api(`/api/cards/${currentCard.id}/review?correct=${correct}&time_ms=${timeMs}`, { method: 'POST' });
+        const result = await api(`/api/cards/${currentCard.id}/review?correct=${correct}&time_ms=${timeMs}&session_id=${encodeURIComponent(studySessionId || '')}`, { method: 'POST' });
+        if (correct) studyCorrect++;
+        studyStartTime = Date.now();
         if (result.xp_earned) showToast(`+${result.xp_earned} XP`, 'xp', 1500);
-    } catch (e) { console.error(e); }
-    studyIndex++;
-    renderStudyCard();
+        studyIndex++;
+        renderStudyCard();
+    } catch (e) {
+        reviewInFlight = false;
+        setStudyActionsDisabled(false);
+        showToast(e.message, 'error', 4000);
+    }
 }
 
 async function finishStudy() {
+    if (finishInFlight) return;
+    finishInFlight = true;
+    const area = document.getElementById('study-card-area');
+    area.innerHTML = `<div class="empty-state"><div class="text">Saving study session...</div></div>`;
+    document.getElementById('study-actions').innerHTML = `
+        <button class="btn btn-outline" onclick="deckBack()">Back to deck</button>`;
+    document.getElementById('study-actions').style.display = 'flex';
     try {
-        const result = await api(`/api/session/complete?deck_id=${currentDeckId}&correct_count=${studyCorrect}&total_count=${studyCards.length}`, { method: 'POST' });
+        const result = await api(`/api/session/complete?deck_id=${currentDeckId}&session_id=${encodeURIComponent(studySessionId || '')}`, { method: 'POST' });
         const pct = studyCards.length > 0 ? Math.round((studyCorrect / studyCards.length) * 100) : 0;
         let emoji = '🎉';
         if (pct === 100) emoji = '🏆';
@@ -670,7 +696,15 @@ async function finishStudy() {
         document.getElementById('results-xp').textContent = `+${result.bonus_xp} XP`;
         document.getElementById('results-streak').textContent = result.streak > 0 ? `${result.streak} day streak 🔥` : '';
         showView('results');
-    } catch (e) { showToast(e.message, 'error'); }
+    } catch (e) {
+        area.innerHTML = `<div class="empty-state"><div class="text">Could not save study session.</div></div>`;
+        document.getElementById('study-actions').innerHTML = `
+            <button class="btn btn-primary" onclick="finishStudy()">Retry save</button>
+            <button class="btn btn-outline" onclick="deckBack()">Back to deck</button>`;
+        showToast(e.message, 'error', 4000);
+    } finally {
+        finishInFlight = false;
+    }
 }
 
 function confirmQuitStudy() {
@@ -690,7 +724,7 @@ async function loadAchievements() {
         list.innerHTML = `<div class="text-center text-muted text-sm mb-16">${unlocked}/${data.achievements.length} unlocked</div>` +
             data.achievements.map(a => `
             <div class="achievement ${a.unlocked_at ? '' : 'locked'}">
-                <div class="ach-icon">${a.icon}</div>
+                <div class="ach-icon">${esc(a.icon)}</div>
                 <div class="info">
                     <div class="ach-name">${esc(a.name)}</div>
                     <div class="ach-desc">${esc(a.description)}</div>
@@ -707,7 +741,7 @@ async function loadSettings() {
         const select = document.getElementById('model-select');
         if (status.models && status.models.length > 0) {
             select.innerHTML = status.models.map(m =>
-                `<option value="${m}" ${m === settings.model ? 'selected' : ''}>${m}</option>`).join('');
+                `<option value="${escAttr(m)}" ${m === settings.model ? 'selected' : ''}>${esc(m)}</option>`).join('');
         }
         const statusEl = document.getElementById('ollama-status');
         if (status.running) {
@@ -732,7 +766,16 @@ function esc(str) {
     div.textContent = str || '';
     return div.innerHTML;
 }
-function escAttr(str) { return (str || '').replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
+function escAttr(str) {
+    return esc(str).replace(/'/g, '&#39;').replace(/`/g, '&#96;');
+}
+function safeColor(color) {
+    return /^#[0-9a-fA-F]{6}$/.test(color || '') ? color : 'var(--primary)';
+}
+function revokeThumbnailUrls() {
+    thumbnailUrls.forEach(url => URL.revokeObjectURL(url));
+    thumbnailUrls = [];
+}
 
 // ── Init ─────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => { loadHome(); });

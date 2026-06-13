@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from database import Database, level_from_xp, xp_for_level, xp_to_next_level
+from database import Database, SCHEMA_VERSION, level_from_xp, xp_for_level, xp_to_next_level
 
 
 class TestLevelSystem:
@@ -239,6 +239,13 @@ class TestProgress:
         assert p["total_cards_reviewed"] == 1
         assert p["total_correct"] == 1
 
+    def test_record_session_increments_every_session_same_day(self, db):
+        db.record_session()
+        db.record_session()
+        p = db.get_progress()
+        assert p["total_sessions"] == 2
+        assert p["current_streak"] == 1
+
 
 class TestAchievements:
     def test_initial_locked(self, db):
@@ -255,6 +262,10 @@ class TestAchievements:
         db.create_deck(name="First")
         assert db.unlock_achievement("First Deck") is False
 
+    def test_public_check_achievements(self, db):
+        db.create_deck(name="First")
+        assert db.check_achievements() == []
+
 
 class TestSettings:
     def test_default_model(self, db):
@@ -263,3 +274,55 @@ class TestSettings:
     def test_set_model(self, db):
         db.set_setting("model", "gemma3:4b")
         assert db.get_model() == "gemma3:4b"
+
+
+class TestSchemaSetup:
+    def test_connection_sets_busy_timeout(self, db):
+        conn = db._conn()
+        try:
+            timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        finally:
+            conn.close()
+        assert timeout == 5000
+
+    def test_wal_enabled(self, db):
+        conn = db._conn()
+        try:
+            mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            conn.close()
+        assert mode.lower() == "wal"
+
+    def test_common_indexes_exist(self, db):
+        conn = db._conn()
+        try:
+            indexes = {row[1] for row in conn.execute("PRAGMA index_list(cards)").fetchall()}
+            deck_indexes = {row[1] for row in conn.execute("PRAGMA index_list(decks)").fetchall()}
+        finally:
+            conn.close()
+        assert "idx_cards_deck_id" in indexes
+        assert "idx_cards_deck_review" in indexes
+        assert "idx_decks_folder_id" in deck_indexes
+
+    def test_legacy_image_path_backfilled_into_deck_images(self, db):
+        conn = db._conn()
+        try:
+            cur = conn.execute(
+                "INSERT INTO decks (name, image_path) VALUES (?, ?)",
+                ("Legacy", "legacy.jpg"),
+            )
+            did = cur.lastrowid
+            conn.commit()
+        finally:
+            conn.close()
+        db._init_db()
+        images = db.get_deck_images(did)
+        assert [img["image_path"] for img in images] == ["legacy.jpg"]
+
+    def test_schema_version_is_set(self, db):
+        conn = db._conn()
+        try:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            conn.close()
+        assert version == SCHEMA_VERSION

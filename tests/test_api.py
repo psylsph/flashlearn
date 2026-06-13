@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -11,29 +12,33 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import database as db_module
 import tempfile
 tmp = tempfile.mkdtemp()
-test_db_path = os.path.join(tmp, "test.db")
+bootstrap_db_path = Path(tmp) / "bootstrap.db"
 
-# Patch DB_PATH before Database init
-db_module.DB_PATH = type('', (), {
-    '__truediv__': lambda s, o: test_db_path,
-    'parent': type('', (), {
-        'mkdir': lambda **kw: None,
-        '__truediv__': lambda s, o: type('', (), {'mkdir': lambda **kw: None})()
-    })()
-})()
+# Patch DB_PATH before importing main so module-level Database init does not touch app data.
+db_module.DB_PATH = bootstrap_db_path
 
 from database import Database
-test_db = Database()
+test_db = None
 import main
-main.db = test_db
 
 
 @pytest.fixture
-def client():
+def client(tmp_path):
+    global test_db
+    db_module.DB_PATH = tmp_path / "test.db"
+    test_db = Database()
+    main.db = test_db
+    main.PHOTO_DIR = tmp_path / "photos"
+    main.PHOTO_DIR.mkdir(parents=True, exist_ok=True)
+    main.study_sessions.clear()
     return TestClient(main.app)
 
 
 class TestStatusEndpoint:
+    def test_favicon(self, client):
+        r = client.get("/favicon.ico")
+        assert r.status_code == 200
+
     def test_get_status(self, client):
         with patch("main.check_ollama_status", return_value={"running": True, "models": ["gemma4:31b-cloud"]}):
             r = client.get("/api/status")
@@ -57,12 +62,33 @@ class TestSettingsEndpoints:
         r = client.put("/api/settings?model=gemma3:4b")
         assert r.status_code == 200
 
+    def test_update_settings_rejects_blank_model(self, client):
+        r = client.put("/api/settings?model=%20%20%20")
+        assert r.status_code == 400
+
+    def test_update_settings_strips_model(self, client):
+        r = client.put("/api/settings?model=%20gemma3:4b%20")
+        assert r.status_code == 200
+        assert test_db.get_model() == "gemma3:4b"
+
 
 class TestFolderEndpoints:
     def test_create_folder(self, client):
         r = client.post("/api/folders", data={"name": "Chemistry", "icon": "🧪"})
         assert r.status_code == 200
         assert "id" in r.json()
+
+    def test_create_folder_rejects_blank_name(self, client):
+        r = client.post("/api/folders", data={"name": "   "})
+        assert r.status_code == 400
+
+    def test_create_folder_rejects_bad_color(self, client):
+        r = client.post("/api/folders", data={"name": "Bad", "color": "red"})
+        assert r.status_code == 400
+
+    def test_create_folder_rejects_long_icon(self, client):
+        r = client.post("/api/folders", data={"name": "Bad", "icon": "x" * 9})
+        assert r.status_code == 400
 
     def test_list_folders(self, client):
         client.post("/api/folders", data={"name": "History"})
@@ -92,6 +118,17 @@ class TestDeckEndpoints:
         r = client.post("/api/decks", data={"name": "Test Deck"})
         assert r.status_code == 200
 
+    def test_create_deck_rejects_blank_name(self, client):
+        r = client.post("/api/decks", data={"name": "   "})
+        assert r.status_code == 400
+
+    def test_create_deck_strips_and_caps_name(self, client):
+        r = client.post("/api/decks", data={"name": f"  {'x' * 250}  "})
+        assert r.status_code == 200
+        deck = test_db.get_deck(r.json()["id"])
+        assert len(deck["name"]) == 200
+        assert deck["name"] == "x" * 200
+
     def test_create_deck_in_folder(self, client):
         f = client.post("/api/folders", data={"name": "Bio"})
         fid = f.json()["id"]
@@ -100,6 +137,10 @@ class TestDeckEndpoints:
         did = r.json()["id"]
         deck = test_db.get_deck(did)
         assert deck["folder_id"] == fid
+
+    def test_create_deck_invalid_folder(self, client):
+        r = client.post("/api/decks", data={"name": "Cells", "folder_id": 99999})
+        assert r.status_code == 400
 
     def test_list_decks_by_folder(self, client):
         f = client.post("/api/folders", data={"name": "Math"})
@@ -121,10 +162,31 @@ class TestDeckEndpoints:
         r = client.put(f"/api/decks/{did}/move?folder_id={fid}")
         assert r.status_code == 200
 
+    def test_move_deck_invalid_folder(self, client):
+        d = client.post("/api/decks", data={"name": "Mover"})
+        did = d.json()["id"]
+        r = client.put(f"/api/decks/{did}/move?folder_id=99999")
+        assert r.status_code == 400
+
     def test_delete_deck(self, client):
         d = client.post("/api/decks", data={"name": "Delete Me"})
         did = d.json()["id"]
         assert client.delete(f"/api/decks/{did}").status_code == 200
+
+    def test_delete_deck_removes_all_image_records_and_files(self, client, sample_png_bytes):
+        ai_result = {"success": True, "cards": [{"question": "Q?", "answer": "A", "type": "flashcard"}]}
+        with patch("main.generate_cards", return_value=ai_result):
+            r = client.post("/api/upload", files=[
+                ("photos", ("img1.png", sample_png_bytes, "image/png")),
+                ("photos", ("img2.png", sample_png_bytes, "image/png")),
+            ], data={"deck_name": "Images", "folder_id": "", "model": ""})
+        did = r.json()["deck"]["id"]
+        image_paths = [img["image_path"] for img in test_db.get_deck_images(did)]
+        assert len(image_paths) == 2
+        assert all((main.PHOTO_DIR / p).exists() for p in image_paths)
+        assert client.delete(f"/api/decks/{did}").status_code == 200
+        assert test_db.get_deck_images(did) == []
+        assert all(not (main.PHOTO_DIR / p).exists() for p in image_paths)
 
 
 class TestMultiImageUpload:
@@ -186,14 +248,69 @@ class TestMultiImageUpload:
         r = client.post("/api/upload", files=[
             ("photos", ("bad.txt", b"not an image", "text/plain")),
         ], data={"deck_name": "", "folder_id": "", "model": ""})
-        assert r.status_code == 500
+        assert r.status_code == 400
 
     def test_upload_ai_failure(self, client, sample_png_bytes):
         with patch("main.generate_cards", return_value={"success": False, "error": "AI down"}):
             r = client.post("/api/upload", files=[
                 ("photos", ("test.png", sample_png_bytes, "image/png")),
             ], data={"deck_name": "", "folder_id": "", "model": ""})
-        assert r.status_code == 500
+        assert r.status_code == 502
+
+    def test_upload_invalid_folder(self, client, sample_png_bytes):
+        r = client.post("/api/upload", files=[
+            ("photos", ("test.png", sample_png_bytes, "image/png")),
+        ], data={"deck_name": "", "folder_id": "99999", "model": ""})
+        assert r.status_code == 400
+
+    def test_upload_mixed_valid_and_invalid_image_succeeds(self, client, sample_png_bytes):
+        ai_result = {"success": True, "cards": [{"question": "Q?", "answer": "A", "type": "flashcard"}]}
+        with patch("main.generate_cards", return_value=ai_result):
+            r = client.post("/api/upload", files=[
+                ("photos", ("good.png", sample_png_bytes, "image/png")),
+                ("photos", ("bad.txt", b"not an image", "text/plain")),
+            ], data={"deck_name": "Mixed", "folder_id": "", "model": ""})
+        assert r.status_code == 200
+        assert r.json()["images_processed"] == 1
+        assert len(r.json()["errors"]) == 1
+
+    def test_upload_cleans_saved_files_after_database_failure(self, client, sample_png_bytes):
+        ai_result = {"success": True, "cards": [{"question": "Q?", "answer": "A", "type": "flashcard"}]}
+        with patch("main.generate_cards", return_value=ai_result), \
+             patch.object(test_db, "create_deck_with_cards", side_effect=RuntimeError("db failed")):
+            with pytest.raises(RuntimeError):
+                client.post("/api/upload", files=[
+                    ("photos", ("test.png", sample_png_bytes, "image/png")),
+                ], data={"deck_name": "", "folder_id": "", "model": ""})
+        assert list(main.PHOTO_DIR.iterdir()) == []
+
+    def test_upload_cleans_saved_files_after_mid_loop_exception(self, client, sample_png_bytes):
+        ai_result = {"success": True, "cards": [{"question": "Q?", "answer": "A", "type": "flashcard"}]}
+        with patch("main.generate_cards", return_value=ai_result), \
+             patch("main._normalize_image", side_effect=[sample_png_bytes, RuntimeError("boom")]):
+            with pytest.raises(RuntimeError):
+                client.post("/api/upload", files=[
+                    ("photos", ("img1.png", sample_png_bytes, "image/png")),
+                    ("photos", ("img2.png", sample_png_bytes, "image/png")),
+                ], data={"deck_name": "", "folder_id": "", "model": ""})
+        assert list(main.PHOTO_DIR.iterdir()) == []
+
+    def test_upload_strips_and_caps_ai_metadata(self, client, sample_png_bytes):
+        ai_result = {
+            "success": True,
+            "subject": f"  {'s' * 250}  ",
+            "deck_name": f"  {'d' * 250}  ",
+            "description": f"  {'x' * 2500}  ",
+            "cards": [{"question": "Q?", "answer": "A", "type": "flashcard"}],
+        }
+        with patch("main.generate_cards", return_value=ai_result):
+            r = client.post("/api/upload", files=[
+                ("photos", ("test.png", sample_png_bytes, "image/png")),
+            ], data={"deck_name": "", "folder_id": "", "model": ""})
+        deck = r.json()["deck"]
+        assert deck["name"] == "d" * 200
+        assert deck["subject"] == "s" * 200
+        assert deck["description"] == "x" * 2000
 
 
 class TestStudyEndpoints:
@@ -205,20 +322,86 @@ class TestStudyEndpoints:
         assert r.status_code == 200
         assert len(r.json()["cards"]) >= 1
 
+    def test_nonexistent_deck_study_returns_404(self, client):
+        r = client.get("/api/decks/99999/study")
+        assert r.status_code == 404
+
+    def test_get_study_cards_cleans_expired_sessions(self, client):
+        main.study_sessions["expired"] = {
+            "deck_id": 1,
+            "card_ids": set(),
+            "reviewed": {},
+            "created_at": 0,
+            "completed": False,
+        }
+        d = client.post("/api/decks", data={"name": "Study Deck"})
+        did = d.json()["id"]
+        test_db.add_card(did, "Q?", "A")
+        assert client.get(f"/api/decks/{did}/study").status_code == 200
+        assert "expired" not in main.study_sessions
+
     def test_review_card(self, client):
         d = client.post("/api/decks", data={"name": "Review Deck"})
         did = d.json()["id"]
         cid = test_db.add_card(did, "Q?", "A")
-        r = client.post(f"/api/cards/{cid}/review?correct=true&time_ms=500")
+        session = client.get(f"/api/decks/{did}/study").json()["session_id"]
+        r = client.post(f"/api/cards/{cid}/review?correct=true&time_ms=500&session_id={session}")
         assert r.status_code == 200
         assert r.json()["xp_earned"] == 15
+
+    def test_duplicate_review_returns_409(self, client):
+        d = client.post("/api/decks", data={"name": "Review Deck"})
+        did = d.json()["id"]
+        cid = test_db.add_card(did, "Q?", "A")
+        session = client.get(f"/api/decks/{did}/study").json()["session_id"]
+        assert client.post(f"/api/cards/{cid}/review?correct=true&session_id={session}").status_code == 200
+        r = client.post(f"/api/cards/{cid}/review?correct=true&session_id={session}")
+        assert r.status_code == 409
+
+    def test_complete_session_before_all_cards_reviewed_returns_400(self, client):
+        d = client.post("/api/decks", data={"name": "Partial Deck"})
+        did = d.json()["id"]
+        cids = [test_db.add_card(did, f"Q{i}?", f"A{i}") for i in range(2)]
+        session = client.get(f"/api/decks/{did}/study").json()["session_id"]
+        assert client.post(f"/api/cards/{cids[0]}/review?correct=true&session_id={session}").status_code == 200
+        r = client.post(f"/api/session/complete?deck_id={did}&session_id={session}")
+        assert r.status_code == 400
 
     def test_session_complete(self, client):
         d = client.post("/api/decks", data={"name": "Session Deck"})
         did = d.json()["id"]
-        r = client.post(f"/api/session/complete?deck_id={did}&correct_count=9&total_count=10")
+        cids = [test_db.add_card(did, f"Q{i}?", f"A{i}") for i in range(10)]
+        session = client.get(f"/api/decks/{did}/study").json()["session_id"]
+        for cid in cids[:9]:
+            assert client.post(f"/api/cards/{cid}/review?correct=true&session_id={session}").status_code == 200
+        assert client.post(f"/api/cards/{cids[9]}/review?correct=false&session_id={session}").status_code == 200
+        r = client.post(f"/api/session/complete?deck_id={did}&session_id={session}")
         assert r.status_code == 200
         assert r.json()["bonus_xp"] == 50  # 90%+
+
+    def test_fast_session_unlocks_speed_demon(self, client):
+        d = client.post("/api/decks", data={"name": "Fast Deck"})
+        did = d.json()["id"]
+        cids = [test_db.add_card(did, f"Q{i}?", f"A{i}") for i in range(3)]
+        session = client.get(f"/api/decks/{did}/study").json()["session_id"]
+        for cid in cids:
+            assert client.post(f"/api/cards/{cid}/review?correct=true&time_ms=3000&session_id={session}").status_code == 200
+        assert client.post(f"/api/session/complete?deck_id={did}&session_id={session}").status_code == 200
+        achievements = test_db.get_achievements()
+        speed_demon = next(a for a in achievements if a["name"] == "Speed Demon")
+        assert speed_demon["unlocked_at"] is not None
+
+    def test_slow_session_does_not_unlock_speed_demon(self, client):
+        d = client.post("/api/decks", data={"name": "Slow Deck"})
+        did = d.json()["id"]
+        cids = [test_db.add_card(did, f"Q{i}?", f"A{i}") for i in range(3)]
+        session = client.get(f"/api/decks/{did}/study").json()["session_id"]
+        for cid in cids:
+            assert client.post(f"/api/cards/{cid}/review?correct=true&time_ms=7000&session_id={session}").status_code == 200
+        assert client.post(f"/api/session/complete?deck_id={did}&session_id={session}").status_code == 200
+        achievements = test_db.get_achievements()
+        speed_demon = next(a for a in achievements if a["name"] == "Speed Demon")
+        assert speed_demon["unlocked_at"] is None
 
 
 class TestCardEndpoints:
