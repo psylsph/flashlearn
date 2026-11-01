@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0c17">
     <title>FlashLearn</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -45,7 +46,10 @@
             <div class="header">
                 <button class="header-back" onclick="showView('home')">← Back</button>
                 <h1 id="folder-title">📁 Folder</h1>
-                <button class="btn-icon" onclick="confirmDeleteFolder()">🗑️</button>
+                <div class="header-actions">
+                    <button class="btn-icon" onclick="editFolderIcon(currentFolderId)" title="Change icon">✏️</button>
+                    <button class="btn-icon" onclick="confirmDeleteFolder()" title="Delete folder">🗑️</button>
+                </div>
             </div>
             <div class="deck-list" id="folder-deck-list"></div>
         </div>

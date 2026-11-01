@@ -100,7 +100,7 @@ async function loadHome() {
             for (const f of folders.folders) {
                 html += `
                     <div class="folder-card" style="--fc:${safeColor(f.color)}" onclick="openFolder(${f.id})">
-                        <div style="position:absolute;top:0;left:0;right:0;height:4px;background:${safeColor(f.color)}"></div>
+                        <button class="btn-icon btn-sm-icon edit-btn" onclick="event.stopPropagation(); editFolderIcon(${f.id})" title="Change icon" aria-label="Change icon for ${escAttr(f.name)}">✏️</button>
                         <div class="folder-icon">${esc(f.icon)}</div>
                         <div class="folder-name">${esc(f.name)}</div>
                         <div class="folder-meta">${f.deck_count} decks · ${f.card_count} cards</div>
@@ -227,6 +227,58 @@ async function createFolder() {
         });
         showToast(`Created "${name}" folder`, 'success');
         showView('home');
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+// ── Edit Folder Icon ─────────────────────────────────────────
+async function editFolderIcon(folderId) {
+    try {
+        const { folders } = await api('/api/folders');
+        const folder = folders.find(f => f.id === folderId);
+        if (!folder) { showToast('Folder not found', 'error'); return; }
+
+        closeFolderIconPicker();
+        const overlay = document.createElement('div');
+        overlay.id = 'icon-picker-overlay';
+        overlay.className = 'move-picker-overlay';
+        overlay.innerHTML = `
+            <div class="move-picker">
+                <div class="move-picker-title">Change icon · ${esc(folder.name)}</div>
+                <div class="icon-grid" style="margin:4px 16px 12px;">
+                    ${FOLDER_ICONS.map(icon =>
+                        `<div class="icon-option ${esc(icon) === esc(folder.icon) ? 'selected' : ''}"
+                              data-icon="${escAttr(icon)}" role="button" aria-label="Pick icon ${escAttr(icon)}">${esc(icon)}</div>`
+                    ).join('')}
+                </div>
+                <div class="move-picker-option move-picker-cancel" onclick="closeFolderIconPicker()">Cancel</div>
+            </div>`;
+
+        // Click outside the sheet, or on an icon, or Cancel
+        overlay.addEventListener('click', (e) => {
+            const option = e.target.closest('.icon-option');
+            if (option) {
+                option.parentElement.querySelector('.selected')?.classList.remove('selected');
+                option.classList.add('selected');
+                saveFolderIcon(folder.id, option.dataset.icon);
+                return;
+            }
+            if (e.target === overlay) closeFolderIconPicker();
+        });
+        document.body.appendChild(overlay);
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+function closeFolderIconPicker() {
+    document.getElementById('icon-picker-overlay')?.remove();
+}
+
+async function saveFolderIcon(folderId, icon) {
+    try {
+        await api(`/api/folders/${folderId}?icon=${encodeURIComponent(icon)}`, { method: 'PUT' });
+        closeFolderIconPicker();
+        showToast('Icon updated', 'success');
+        if (currentView === 'folder' && currentFolderId) openFolder(currentFolderId);
+        else if (currentView === 'home') loadHome();
     } catch (e) { showToast(e.message, 'error'); }
 }
 
